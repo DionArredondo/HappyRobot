@@ -1,0 +1,2 @@
+Always refer to the context files located in `context/architecture.md`, `context/SKILLS.md`, and `context/data-schema.md` before generating code.
+Enforce strict compliance with the mathematical negotiation state logic, header-based security, and database table column typing specified within those files.
