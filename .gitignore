@@ -27,9 +27,22 @@ logs/
 *.swp
 *.swo
 .DS_Store
+__pycache__/
 
 # OS metadata
 Thumbs.db
 
 # Testing
 coverage/
+
+# VS Code
+.vscode/
+
+# Cursor
+.cursorrules
+
+# GEMINI
+.gemini/
+
+# Context
+context/
