@@ -5,6 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import plotly.express as px
 from dotenv import load_dotenv
+from supabase import create_client
 
 # Load environment variables at the absolute top
 load_dotenv()
@@ -154,28 +155,31 @@ def submit_call_log(call_id, carrier_mc, load_id, duration, outcome, sentiment, 
 # Helper function for fetching call logs
 @st.cache_data(ttl=60)
 def fetch_call_logs():
-    """Fetch all call logs from the backend."""
+    """Fetch all call logs from Supabase call_logs table."""
     try:
-        response = httpx.get(
-            f"{BACKEND_API_URL}/call-logs",
-            headers={"X-API-KEY": BACKEND_API_KEY},
-            timeout=10.0
-        )
-        if response.status_code == 200:
-            data = response.json()
-            if data:
-                # Handle both list and single object responses
-                if isinstance(data, list):
-                    df = pd.DataFrame(data)
-                else:
-                    df = pd.DataFrame([data])
-                return df
-            else:
-                return None
+        # Get Supabase credentials from environment
+        supabase_url = os.getenv("SUPABASE_URL")
+        supabase_key = os.getenv("SUPABASE_KEY")
+        
+        if not supabase_url or not supabase_key:
+            st.warning("⚠️ Supabase credentials not configured in environment")
+            return None
+        
+        # Create Supabase client
+        supabase = create_client(supabase_url, supabase_key)
+        
+        # Query the call_logs table
+        response = supabase.table("call_logs").select("*").execute()
+        
+        if response.data and len(response.data) > 0:
+            # Convert list of records to DataFrame
+            df = pd.DataFrame(response.data)
+            return df
         else:
             return None
+            
     except Exception as e:
-        st.warning(f"Error fetching call logs: {str(e)}")
+        st.warning(f"Error fetching call logs from Supabase: {str(e)}")
         return None
 
 # Initialize session state for voice bot simulator
@@ -314,158 +318,140 @@ with tab2:
                 st.error("❌ Carrier Fraud/Ineligible. Call Terminated.")
                 st.session_state.mc_verified = False
     
+    # ------------------------------------------------------------------------
+    # CONTROL DE FLUJO PASO A PASO (Sin usar st.stop())
+    # ------------------------------------------------------------------------
     if not st.session_state.mc_verified:
+        # Si no se ha verificado el MC, se muestra el aviso y se bloquea visualmente el avance
         st.info("ℹ️ Complete Step 1 to unlock the remaining steps")
-        st.stop()
-    
-    st.markdown("---")
-    
-    # ============================================================================
-    # STEP 2: INBOUND LOAD MATCHING
-    # ============================================================================
-    st.markdown("#### Step 2: 📦 Inbound Load Matching")
-    st.markdown("Search for available freight matching your requirements")
-    
-    col_search1, col_search2, col_search3 = st.columns(3)
-    with col_search1:
-        origin_input = st.text_input("Origin", placeholder="e.g., New York", key="origin_input")
-    with col_search2:
-        destination_input = st.text_input("Destination", placeholder="e.g., Los Angeles", key="destination_input")
-    with col_search3:
-        equipment_input = st.text_input("Equipment Type", placeholder="e.g., Dry Van", key="equipment_input")
-    
-    search_button = st.button("2. Search Matching Loads", key="search_button")
-    
-    if search_button:
-        with st.spinner("Searching for matching loads..."):
-            matching_data = search_matching_loads(origin_input, destination_input, equipment_input)
-            if matching_data:
-                # Handle both list and single object responses
-                if isinstance(matching_data, list):
-                    loads_list = matching_data
-                else:
-                    loads_list = [matching_data]
-                
-                if len(loads_list) > 0:
-                    # Use first matching load
-                    matched_load = loads_list[0]
-                    st.session_state.matched_load = matched_load
-                    
-                    st.success(f"✅ Found {len(loads_list)} matching load(s)!")
-                    
-                    st.markdown("##### Best Match Load Details:")
-                    col_load1, col_load2, col_load3 = st.columns(3)
-                    with col_load1:
-                        st.metric("Load ID", matched_load.get("id", "N/A"))
-                    with col_load2:
-                        route = f"{matched_load.get('origin', 'N/A')} → {matched_load.get('destination', 'N/A')}"
-                        st.metric("Route", route)
-                    with col_load3:
-                        rate = matched_load.get("loadboard_rate", 0)
-                        st.metric("Rate", f"${rate:,.2f}" if rate > 0 else "N/A")
-                    
-                    st.json(matched_load)
-                else:
-                    st.warning("⚠️ No matching loads found. Try different filters.")
-            else:
-                st.error("❌ Failed to search loads. Please try again.")
-    
-    if st.session_state.matched_load is None:
-        st.info("ℹ️ Complete Step 2 to unlock negotiation")
-        st.stop()
-    
-    st.markdown("---")
-    
-    # ============================================================================
-    # STEP 3: BOUNDED PRICE NEGOTIATION
-    # ============================================================================
-    st.markdown("#### Step 3: 💰 Bounded Price Negotiation")
-    st.markdown("Submit your counter offer for the matched load")
-    
-    current_rate = st.session_state.matched_load.get("loadboard_rate", 0)
-    st.info(f"📊 Current Loadboard Rate: **${current_rate:,.2f}**")
-    
-    col_nego1, col_nego2 = st.columns([3, 1])
-    with col_nego1:
-        counter_offer = st.number_input(
-            "Your Counter Offer ($)",
-            min_value=100.0,
-            value=float(current_rate),
-            step=100.0,
-            key="counter_offer"
-        )
-    
-    with col_nego2:
-        nego_button = st.button("3. Submit Counter Offer", key="nego_button")
-    
-    if nego_button:
-        load_id = st.session_state.matched_load.get("load_id")
-        with st.spinner("Processing negotiation..."):
-            nego_result = negotiate_load(load_id, counter_offer)
-            st.session_state.final_call_data = nego_result
-            st.session_state.final_rate = counter_offer  # Store counter_offer as final_rate for Step 4
-            
-            status = nego_result.get("status", "ERROR")
-            
-            if status == "ACCEPTED":
-                st.success(f"🎉 **NEGOTIATION ACCEPTED!** Load confirmed at ${counter_offer:,.2f}")
-                st.session_state.negotiation_done = True
-            elif status == "COUNTER":
-                bot_counter = nego_result.get("counter_offer", current_rate)
-                st.info(f"🔄 **BOT COUNTER-OFFER** The bot countered at ${bot_counter:,.2f}")
-            elif status == "REJECTED":
-                st.error(f"❌ **OFFER REJECTED** Rate is too low. Minimum: ${nego_result.get('min_rate', current_rate):,.2f}")
-            else:
-                st.error(f"❌ **NEGOTIATION ERROR**: {nego_result.get('message', 'Unknown error')}")
-    
-    st.markdown("---")
-    
-    # ============================================================================
-    # STEP 4: SUBMIT CALL LOG
-    # ============================================================================
-    st.markdown("#### Step 4: 📝 Terminate & Log Call")
-    st.markdown("Submit the call to the system for record-keeping")
-    
-    if st.session_state.final_call_data is None:
-        st.info("ℹ️ Complete Step 3 negotiation before logging the call")
     else:
-        # Auto-generate call data
-        import random
-        duration = random.randint(120, 900)  # Random duration 2-15 minutes
-        outcome = st.session_state.final_call_data.get("status", "NEUTRAL")
-        sentiment = "POSITIVE" if outcome == "ACCEPTED" else "NEUTRAL"
+        # Todo el resto del simulador se ejecuta de manera segura aquí dentro
+        st.markdown("---")
         
-        col_log1, col_log2, col_log3 = st.columns(3)
-        with col_log1:
-            st.metric("Call Duration", f"{duration} sec")
-        with col_log2:
-            st.metric("Outcome", outcome)
-        with col_log3:
-            st.metric("Sentiment", sentiment)
+        # ============================================================================
+        # STEP 2: INBOUND LOAD MATCHING
+        # ============================================================================
+        st.markdown("#### Step 2: 📦 Inbound Load Matching")
+        st.markdown("Search for available freight matching your requirements")
         
-        log_button = st.button("4. Terminate and Log Call", key="log_button")
+        col_search1, col_search2, col_search3 = st.columns(3)
+        with col_search1:
+            origin_input = st.text_input("Origin", placeholder="e.g., New York", key="origin_input")
+        with col_search2:
+            destination_input = st.text_input("Destination", placeholder="e.g., Los Angeles", key="destination_input")
+        with col_search3:
+            equipment_input = st.text_input("Equipment Type", placeholder="e.g., Dry Van", key="equipment_input")
         
-        if log_button:
-            with st.spinner("Logging call to system..."):
-                import uuid
-                call_id = str(uuid.uuid4())  # Generate unique call ID
-                final_rate = st.session_state.get("final_rate", None)  # Retrieve counter_offer from session state
-                
-                success = submit_call_log(
-                    call_id=call_id,
-                    carrier_mc=st.session_state.mc_number,
-                    load_id=st.session_state.matched_load.get("id"),
-                    duration=duration,
-                    outcome=outcome,
-                    sentiment=sentiment,
-                    final_rate=final_rate
-                )
-                
-                if success:
-                    st.success("🚀 Call successfully logged to Supabase!")
-                    st.balloons()
+        search_button = st.button("2. Search Matching Loads", key="search_button")
+        
+        if search_button:
+            with st.spinner("Searching for matching loads..."):
+                matching_data = search_matching_loads(origin_input, destination_input, equipment_input)
+                if matching_data:
+                    if isinstance(matching_data, list):
+                        loads_list = matching_data
+                    else:
+                        loads_list = [matching_data]
+                    
+                    if len(loads_list) > 0:
+                        matched_load = loads_list[0]
+                        st.session_state.matched_load = matched_load
+                        st.success(f"✅ Found {len(loads_list)} matching load(s)!")
+                    else:
+                        st.warning("⚠️ No matching loads found. Try different filters.")
                 else:
-                    st.error("❌ Failed to log call. Please try again.")
+                    st.error("❌ Failed to search loads. Please try again.")
+        
+        # Control del paso 2 al paso 3
+        if st.session_state.matched_load is None:
+            st.info("ℹ️ Complete Step 2 to unlock negotiation")
+        else:
+            st.markdown("---")
+            
+            # ============================================================================
+            # STEP 3: BOUNDED PRICE NEGOTIATION
+            # ============================================================================
+            st.markdown("#### Step 3: 💰 Bounded Price Negotiation")
+            st.markdown("Submit your counter offer for the matched load")
+            
+            current_rate = st.session_state.matched_load.get("loadboard_rate", 0)
+            st.info(f"📊 Current Loadboard Rate: **${current_rate:,.2f}**")
+            
+            col_nego1, col_nego2 = st.columns([3, 1])
+            with col_nego1:
+                counter_offer = st.number_input(
+                    "Your Counter Offer ($)",
+                    min_value=100.0,
+                    value=float(current_rate),
+                    step=100.0,
+                    key="counter_offer"
+                )
+            
+            with col_nego2:
+                nego_button = st.button("3. Submit Counter Offer", key="nego_button")
+            
+            if nego_button:
+                load_id = st.session_state.matched_load.get("load_id")
+                with st.spinner("Processing negotiation..."):
+                    nego_result = negotiate_load(load_id, counter_offer)
+                    st.session_state.final_call_data = nego_result
+                    st.session_state.final_rate = counter_offer
+                    
+                    status = nego_result.get("status", "ERROR")
+                    if status == "ACCEPTED":
+                        st.success(f"🎉 **NEGOTIATION ACCEPTED!** Load confirmed at ${counter_offer:,.2f}")
+                        st.session_state.negotiation_done = True
+                    elif status == "COUNTER":
+                        bot_counter = nego_result.get("counter_offer", current_rate)
+                        st.info(f"🔄 **BOT COUNTER-OFFER** The bot countered at ${bot_counter:,.2f}")
+                    elif status == "REJECTED":
+                        st.error(f"❌ **OFFER REJECTED** Rate is too low.")
+            
+            st.markdown("---")
+            
+            # ============================================================================
+            # STEP 4: SUBMIT CALL LOG
+            # ============================================================================
+            st.markdown("#### Step 4: 📝 Terminate & Log Call")
+            
+            if st.session_state.final_call_data is None:
+                st.info("ℹ️ Complete Step 3 negotiation before logging the call")
+            else:
+                import random
+                duration = random.randint(120, 900)
+                outcome = st.session_state.final_call_data.get("status", "NEUTRAL")
+                sentiment = "POSITIVE" if outcome == "ACCEPTED" else "NEUTRAL"
+                
+                col_log1, col_log2, col_log3 = st.columns(3)
+                with col_log1:
+                    st.metric("Call Duration", f"{duration} sec")
+                with col_log2:
+                    st.metric("Outcome", outcome)
+                with col_log3:
+                    st.metric("Sentiment", sentiment)
+                
+                log_button = st.button("4. Terminate and Log Call", key="log_button")
+                
+                if log_button:
+                    with st.spinner("Logging call to system..."):
+                        import uuid
+                        call_id = str(uuid.uuid4())
+                        final_rate = st.session_state.get("final_rate", None)
+                        
+                        success = submit_call_log(
+                            call_id=call_id,
+                            carrier_mc=st.session_state.mc_number,
+                            load_id=st.session_state.matched_load.get("id"),
+                            duration=duration,
+                            outcome=outcome,
+                            sentiment=sentiment,
+                            final_rate=final_rate
+                        )
+                        if success:
+                            st.success("🚀 Call successfully logged to Supabase!")
+                            st.balloons()
+                        else:
+                            st.error("❌ Failed to log call.")
 
 with tab3:
     st.markdown("### 📊 Performance Analytics")
@@ -475,97 +461,120 @@ with tab3:
     logs_df = fetch_call_logs()
     
     if logs_df is not None and len(logs_df) > 0:
-        # Calculate key metrics
-        total_calls = len(logs_df)
-        
-        # Average call duration
-        if "duration" in logs_df.columns:
-            avg_duration = logs_df["duration"].mean()
-        else:
+        try:
+            # Calculate key metrics with defensive programming
+            total_calls = len(logs_df)
+            
+            # Average call duration
             avg_duration = 0
-        
-        # Conversion rate (BOOKED calls / total calls)
-        if "outcome" in logs_df.columns:
-            booked_calls = len(logs_df[logs_df["outcome"] == "BOOKED"])
-            conversion_rate = (booked_calls / total_calls * 100) if total_calls > 0 else 0
-        else:
+            if "duration_seconds" in logs_df.columns:
+                try:
+                    durations = pd.to_numeric(logs_df["duration_seconds"], errors="coerce")
+                    avg_duration = durations.mean() if not durations.isna().all() else 0
+                except Exception:
+                    avg_duration = 0
+            
+            # Conversion rate (ACCEPTED calls / total calls)
             conversion_rate = 0
-        
-        # Display key metrics
-        st.markdown("#### 📈 Key Operational Metrics")
-        metric_col1, metric_col2 = st.columns(2)
-        
-        with metric_col1:
-            st.metric("Average Call Duration (seconds)", f"{avg_duration:.0f}s")
-        
-        with metric_col2:
-            st.metric("Conversion Rate (%)", f"{conversion_rate:.1f}%")
-        
-        st.markdown("---")
-        
-        # Create visualizations in two columns
-        st.markdown("#### 📉 Performance Visualizations")
-        viz_col1, viz_col2 = st.columns(2)
-        
-        # Chart 1: Call Volume by Outcome (Bar Chart)
-        with viz_col1:
             if "outcome" in logs_df.columns:
-                outcome_counts = logs_df["outcome"].value_counts().reset_index()
-                outcome_counts.columns = ["Outcome", "Count"]
-                
-                fig_outcome = px.bar(
-                    outcome_counts,
-                    x="Outcome",
-                    y="Count",
-                    title="Call Volume by Outcome",
-                    labels={"Count": "Number of Calls", "Outcome": "Call Outcome"},
-                    color="Outcome",
-                    color_discrete_sequence=px.colors.qualitative.Set2
-                )
-                fig_outcome.update_layout(
-                    xaxis_title="Outcome",
-                    yaxis_title="Number of Calls",
-                    height=400,
-                    showlegend=False
-                )
-                st.plotly_chart(fig_outcome, width='stretch')
-            else:
-                st.warning("Outcome data not available")
-        
-        # Chart 2: Sentiment Distribution (Donut Chart)
-        with viz_col2:
-            if "sentiment" in logs_df.columns:
-                sentiment_counts = logs_df["sentiment"].value_counts().reset_index()
-                sentiment_counts.columns = ["Sentiment", "Count"]
-                
-                fig_sentiment = px.pie(
-                    sentiment_counts,
-                    values="Count",
-                    names="Sentiment",
-                    title="Carrier Sentiment Distribution",
-                    hole=0.4,
-                    color_discrete_sequence=px.colors.qualitative.Set2
-                )
-                fig_sentiment.update_layout(height=400)
-                st.plotly_chart(fig_sentiment, width='stretch')
-            else:
-                st.warning("Sentiment data not available")
-        
-        st.markdown("---")
-        
-        # Summary statistics table
-        st.markdown("#### 📋 Summary Statistics")
-        summary_data = {
-            "Metric": ["Total Calls", "Average Duration (s)", "Conversion Rate (%)", "Total Carriers"],
-            "Value": [
-                total_calls,
-                f"{avg_duration:.0f}",
-                f"{conversion_rate:.1f}",
-                logs_df["mc"].nunique() if "mc" in logs_df.columns else "N/A"
-            ]
-        }
-        summary_df = pd.DataFrame(summary_data)
-        st.dataframe(summary_df, width='stretch', hide_index=True)
-        
+                try:
+                    accepted_calls = len(logs_df[logs_df["outcome"].astype(str).str.upper() == "ACCEPTED"])
+                    conversion_rate = (accepted_calls / total_calls * 100) if total_calls > 0 else 0
+                except Exception:
+                    conversion_rate = 0
+            
+            # Display key metrics
+            st.markdown("#### 📈 Key Operational Metrics")
+            metric_col1, metric_col2 = st.columns(2)
+            
+            with metric_col1:
+                st.metric("Average Call Duration (seconds)", f"{avg_duration:.0f}s")
+            
+            with metric_col2:
+                st.metric("Conversion Rate (%)", f"{conversion_rate:.1f}%")
+            
+            st.markdown("---")
+            
+            # Create visualizations in two columns
+            st.markdown("#### 📉 Performance Visualizations")
+            viz_col1, viz_col2 = st.columns(2)
+            
+            # Chart 1: Call Volume by Outcome (Bar Chart)
+            with viz_col1:
+                try:
+                    if "outcome" in logs_df.columns and not logs_df["outcome"].isna().all():
+                        outcome_counts = logs_df["outcome"].value_counts().reset_index()
+                        outcome_counts.columns = ["outcome", "count"]
+                        
+                        fig_outcome = px.bar(
+                            outcome_counts,
+                            x="outcome",
+                            y="count",
+                            title="Call Volume by Outcome",
+                            labels={"count": "Number of Calls", "outcome": "Call Outcome"},
+                            color="outcome",
+                            color_discrete_sequence=px.colors.qualitative.Set2
+                        )
+                        fig_outcome.update_layout(
+                            xaxis_title="Outcome",
+                            yaxis_title="Number of Calls",
+                            height=400,
+                            showlegend=False
+                        )
+                        st.plotly_chart(fig_outcome, width='stretch')
+                    else:
+                        st.info("📊 No outcome data available for visualization")
+                except Exception as e:
+                    st.warning(f"⚠️ Unable to render outcome chart: {str(e)}")
+            
+            # Chart 2: Sentiment Distribution (Donut Chart)
+            with viz_col2:
+                try:
+                    if "sentiment" in logs_df.columns and not logs_df["sentiment"].isna().all():
+                        sentiment_counts = logs_df["sentiment"].value_counts().reset_index()
+                        sentiment_counts.columns = ["sentiment", "count"]
+                        
+                        fig_sentiment = px.pie(
+                            sentiment_counts,
+                            values="count",
+                            names="sentiment",
+                            title="Carrier Sentiment Distribution",
+                            hole=0.4,
+                            color_discrete_sequence=px.colors.qualitative.Set2
+                        )
+                        fig_sentiment.update_layout(height=400)
+                        st.plotly_chart(fig_sentiment, width='stretch')
+                    else:
+                        st.info("📊 No sentiment data available for visualization")
+                except Exception as e:
+                    st.warning(f"⚠️ Unable to render sentiment chart: {str(e)}")
+            
+            st.markdown("---")
+            
+            # Summary statistics table
+            st.markdown("#### 📋 Summary Statistics")
+            total_carriers = 0
+            try:
+                if "carrier_mc" in logs_df.columns and not logs_df["carrier_mc"].isna().all():
+                    total_carriers = logs_df["carrier_mc"].nunique()
+            except Exception:
+                total_carriers = "N/A"
+            
+            summary_data = {
+                "Metric": ["Total Calls", "Average Duration (s)", "Conversion Rate (%)", "Total Carriers"],
+                "Value": [
+                    str(total_calls),
+                    f"{avg_duration:.0f}",
+                    f"{conversion_rate:.1f}",
+                    str(total_carriers)
+                ]
+            }
+            summary_df = pd.DataFrame(summary_data)
+            st.dataframe(summary_df, width='stretch', hide_index=True)
+            
+        except Exception as e:
+            st.error(f"❌ Error processing analytics data: {str(e)}")
+            st.info("💡 Tip: Ensure call logs have been created in the Voice Bot Simulator")
+    
     else:
-        st.warning("⚠️ No call logs available yet. Start simulating calls to see performance analytics.")
+        st.info("📝 No call logs available yet. Complete some calls in the Voice Bot Simulator to see performance analytics.")
